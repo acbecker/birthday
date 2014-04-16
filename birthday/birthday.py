@@ -10,7 +10,6 @@ from sklearn.utils import array2d, check_random_state, check_arrays
 
 YEAR = 365.25
 MACHINE_EPSILON = np.finfo(np.double).eps
-NUGGET = 10 * MACHINE_EPSILON
 
 # Covariance Functions
 def squared_scaled_exponential(theta, x):
@@ -44,10 +43,11 @@ class BirthdayAnalysis(GaussianProcess):
 
     def compareToSklearn(self, npts=-1, doPlot=True):
         gp    = GaussianProcess(corr="squared_exponential", regr="constant",
-                                verbose=True, theta0=365.0)
+                                verbose=True, theta0=365.0, thetaL=1e-1, thetaU=1000)
         X = self.raw_X[:npts]
         y = self.raw_y[:npts]
         gp = gp.fit(X, y)
+        print gp, gp.theta_
         xeval = np.atleast_2d(np.linspace(X.min(), X.max(), 1000)).T
         ypred, mse = gp.predict(xeval, eval_MSE=True)
         sigma = np.sqrt(mse)
@@ -137,19 +137,15 @@ class BirthdayAnalysis(GaussianProcess):
         self.y_mean, self.y_std = y_mean, y_std
 
         # Determine Gaussian Process model parameters
-        self.theta_ = self.theta0
         self.reduced_likelihood_function_value_, par = \
-                                                 self.reduced_likelihood_function(self.theta0)
+                                                 self.reduced_likelihood_function()
 
         # Stuff needed for predict
-        self.beta = par['beta']
-        self.gamma = par['gamma']
-        self.sigma2 = par['sigma2']
         self.C = par['C']
 
         return self
 
-    def reduced_likelihood_function(self, theta0):
+    def reduced_likelihood_function(self, theta=None):
         """ Override for our base class, use emcee to sample posterior"""
         # Initialize output
         reduced_likelihood_function_value = - np.inf
@@ -163,20 +159,20 @@ class BirthdayAnalysis(GaussianProcess):
         lnl0 = -0.5 * n_samples * np.log(2 * np.pi)
         
         def lnlike(params, *args):
-            sigma, scale = params
+            ssq1, lsq1, ssq = params
             D, ij, n_samples = args
 
             # Priors:
-            if sigma < 0 or scale < 0:
+            if ssq1 < 0 or lsq1 < 0 or ssq < 0:
                 return -np.inf
             lnp = 0.0
 
             # Set up R
-            r = self.corr(params, D)
-            R = np.eye(n_samples) * (1. + NUGGET)
+            r = self.corr((ssq1, lsq1), D)
+            R = np.eye(n_samples) * (1. + ssq)
             R[ij[:, 0], ij[:, 1]] = r.ravel()
             R[ij[:, 1], ij[:, 0]] = r.ravel()
-            
+        
             # Cholesky decomposition of R
             try:
                 C = linalg.cholesky(R, lower=True)
@@ -192,7 +188,11 @@ class BirthdayAnalysis(GaussianProcess):
             print params, lnl
             return lnl + lnp
 
-        guess = (0.7, 365.0)
+        if theta is None:
+            guess = (0.7**2, 365.0**2, 0.1**2)
+        else:
+            guess = theta
+            
         ndim, nwalkers, nburn, nstep = len(guess), 2*len(guess), 10, 100
         pos = [np.array((guess)) + 1e-4*np.random.randn(ndim) for i in range(nwalkers)]    
         sampler = emcee.EnsembleSampler(nwalkers, ndim, lnlike, args=(D, ij, n_samples))
@@ -204,17 +204,18 @@ class BirthdayAnalysis(GaussianProcess):
         sortIdx   = np.argsort(flatProb)[::-1]
         sortPars  = sampler.flatchain[sortIdx]
         # MAP or median?
-        mapPars   = sortPars[0]
-        medpars   = np.median(sampler.flatchain, axis=0) # Not guaranteed to be an actual step
+        mapPars     = sortPars[0]
+        medpars     = np.median(sampler.flatchain, axis=0) # Not guaranteed to be an actual step
+        self.theta_ = mapPars
         
         # Using best-fit solution
-        r = self.corr(mapPars, D)
-        R = np.eye(n_samples) * (1. + self.nugget)
-        R[ij[:, 0], ij[:, 1]] = r
-        R[ij[:, 1], ij[:, 0]] = r
+        r = self.corr(mapPars[:-1], D)
+        R = np.eye(n_samples) * (1. + mapPars[-1])
+        R[ij[:, 0], ij[:, 1]] = r.ravel()
+        R[ij[:, 1], ij[:, 0]] = r.ravel()
         C = linalg.cholesky(R, lower=True)
         par['C'] = C
-        reduced_likelihood_function_value = -0.5 * opt.fun
+        reduced_likelihood_function_value = flatProb[sortIdx[0]]
         
         return reduced_likelihood_function_value, par
 
@@ -223,3 +224,8 @@ if __name__ == "__main__":
     bda  = BirthdayAnalysis()
     bda.compareToSklearn(npts=npts)
     bda.fit(npts=npts)
+    import pdb; pdb.set_trace()
+
+    xeval = np.atleast_2d(np.linspace(bda.raw_X.min(), bda.raw_X.max(), 1000)).T
+    ypred = bda.predict(xeval, eval_MSE=False)
+    
