@@ -203,14 +203,17 @@ class BirthdayAnalysis(GaussianProcess):
         flatProb  = sampler.lnprobability.reshape(np.product(sampler.lnprobability.shape))
         sortIdx   = np.argsort(flatProb)[::-1]
         sortPars  = sampler.flatchain[sortIdx]
+
         # MAP or median?
         mapPars     = sortPars[0]
         medpars     = np.median(sampler.flatchain, axis=0) # Not guaranteed to be an actual step
-        self.theta_ = mapPars
         
-        # Using best-fit solution
-        r = self.corr(mapPars[:-1], D)
-        R = np.eye(n_samples) * (1. + mapPars[-1])
+        # Using MAP solution
+        self.theta_ = mapPars[:-1]
+        self.nugget = mapPars[-1]
+        
+        r = self.corr(self.theta_, D)
+        R = np.eye(n_samples) * (1. + self.nugget)
         R[ij[:, 0], ij[:, 1]] = r.ravel()
         R[ij[:, 1], ij[:, 0]] = r.ravel()
         C = linalg.cholesky(R, lower=True)
@@ -222,10 +225,9 @@ class BirthdayAnalysis(GaussianProcess):
 if __name__ == "__main__":
     npts = 100
     bda  = BirthdayAnalysis()
-    bda.compareToSklearn(npts=npts)
+    #bda.compareToSklearn(npts=npts)
     bda.fit(npts=npts)
-    import pdb; pdb.set_trace()
-
     xeval = np.atleast_2d(np.linspace(bda.raw_X.min(), bda.raw_X.max(), 1000)).T
     ypred = bda.predict(xeval, eval_MSE=False)
+    import pdb; pdb.set_trace()
     
