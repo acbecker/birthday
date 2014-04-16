@@ -21,7 +21,10 @@ def periodic_exponential(theta, x):
     return ssq * np.exp(-2*np.sin(np.pi/period * x)**2 / lsq)
 def covariance_full(theta, x):
     """ Represents the full covaraince function for the birthday analysis.  Start simple!"""
-    ssq1, lsq1 = theta
+    # Fixed parameters
+    lsq1 = 100
+    
+    ssq1 = theta
     return squared_scaled_exponential((ssq1, lsq1), x)
 
 # Core class derived from sklearn.gaussian_process.GaussianProcess
@@ -85,20 +88,16 @@ class BirthdayAnalysis(GaussianProcess):
         # Run input checks
         self._check_params(n_samples)
 
-        # Normalize data or don't
+        # Normalize data 
+        # Don't scale x-axis so we understand timescales
+        X_mean = np.zeros(1)
+        X_std = np.ones(1)
         if self.normalize:
-            X_mean = np.mean(X, axis=0)
-            X_std = np.std(X, axis=0)
             y_mean = np.mean(y, axis=0)
             y_std = np.std(y, axis=0)
-            X_std[X_std == 0.] = 1.
             y_std[y_std == 0.] = 1.
-            # center and scale X if necessary
-            X = (X - X_mean) / X_std
             y = (y - y_mean) / y_std
         else:
-            X_mean = np.zeros(1)
-            X_std = np.ones(1)
             y_mean = np.zeros(1)
             y_std = np.ones(1)
 
@@ -109,31 +108,11 @@ class BirthdayAnalysis(GaussianProcess):
             raise Exception("Multiple input features cannot have the same"
                             " value.")
 
-        # Regression matrix and parameters
-        F = self.regr(X)
-        n_samples_F = F.shape[0]
-        if F.ndim > 1:
-            p = F.shape[1]
-        else:
-            p = 1
-        if n_samples_F != n_samples:
-            raise Exception("Number of rows in F and X do not match. Most "
-                            "likely something is going wrong with the "
-                            "regression model.")
-        if p > n_samples_F:
-            raise Exception(("Ordinary least squares problem is undetermined "
-                             "n_samples=%d must be greater than the "
-                             "regression model size p=%d.") % (n_samples, p))
-        if self.beta0 is not None:
-            if self.beta0.shape[0] != p:
-                raise Exception("Shapes of beta0 and F do not match.")
-
         # Set attributes
         self.X = X
         self.y = y
         self.D = D
         self.ij = ij
-        self.F = F
         self.X_mean, self.X_std = X_mean, X_std
         self.y_mean, self.y_std = y_mean, y_std
 
@@ -157,20 +136,19 @@ class BirthdayAnalysis(GaussianProcess):
         n_samples = self.X.shape[0]
         D = self.D
         ij = self.ij
-        F = self.F
         lnl0 = -0.5 * n_samples * np.log(2 * np.pi)
         
         def lnlike(params, *args):
-            ssq1, lsq1, ssq = params
+            ssq1, ssq = params
             D, ij, n_samples = args
 
             # Priors:
-            if ssq1 < 0 or lsq1 < 0 or ssq < 0:
+            if ssq1 < 0 or ssq < 0:
                 return -np.inf
             lnp = 0.0
 
             # Set up R
-            r = self.corr((ssq1, lsq1), D)
+            r = self.corr((ssq1), D)
             R = np.eye(n_samples) * (1. + ssq)
             R[ij[:, 0], ij[:, 1]] = r.ravel()
             R[ij[:, 1], ij[:, 0]] = r.ravel()
@@ -186,18 +164,17 @@ class BirthdayAnalysis(GaussianProcess):
             detR  = (np.diag(C) ** (2. / n_samples)).prod()
 
             # Marginal likelihood
-            lnl   = lnl0
-            lnl  += -0.5 * detR
-            lnl  += -0.5 * np.dot(np.dot(self.y.T, linalg.inv(R)), self.y)
-            print params, lnl
-            return lnl + lnp
+            lnl1  = -0.5 * np.log(detR)
+            lnl2  = -0.5 * np.dot(np.dot(self.y.T, linalg.inv(R)), self.y)
+            print params, lnl0, lnl1, lnl2
+            return lnl0 + lnl1 + lnl2 + lnp
 
         if theta is None:
-            guess = (0.7**2, 1.0**2, 0.1**2)
+            guess = (0.7**2, 0.1**2)
         else:
             guess = theta
-            
-        ndim, nwalkers, nburn, nstep = len(guess), 2*len(guess), 10, 100
+        
+        ndim, nwalkers, nburn, nstep = len(guess), 2*len(guess), 100, 1000
         pos = [np.array((guess)) + 1e-4*np.random.randn(ndim) for i in range(nwalkers)]    
         sampler = emcee.EnsembleSampler(nwalkers, ndim, lnlike, args=(D, ij, n_samples))
         pos, prob, state = sampler.run_mcmc(pos, nburn)
@@ -253,7 +230,7 @@ class BirthdayAnalysis(GaussianProcess):
         if eval_MSE:
             D, ij = l1_cross_distances(X)
             r = self.corr(self.theta_, D)
-            Rpred = np.eye(n_eval) * (1. + self.nugget)
+            Rpred = np.eye(n_eval) # No nugget here?
             Rpred[ij[:, 0], ij[:, 1]] = r.ravel()
             Rpred[ij[:, 1], ij[:, 0]] = r.ravel()
             var = Rpred - np.dot(Rcross, np.dot(Rinv, Rcross.T))
