@@ -38,6 +38,9 @@ class BirthdayAnalysis(GaussianProcess):
         self.lsq42 = 1000**2
         self.p4    = 365.25
 
+        # Sigma-squared amplitudes
+        self.guess = (0.7, 0.4, 0.1, 0.1, 2.0)
+        
     def covariance(self, theta, x):
         ssq1, ssq2, ssq3, ssq4 = theta
         cov1 = squared_scaled_exponential((ssq1, self.lsq1), x)
@@ -178,11 +181,13 @@ class BirthdayAnalysis(GaussianProcess):
             R = np.eye(n_samples) * (1. + params[-1])
             R[ij[:, 0], ij[:, 1]] = r.ravel()
             R[ij[:, 1], ij[:, 0]] = r.ravel()
-        
+
             # Cholesky decomposition of R
             try:
                 C = linalg.cholesky(R, lower=True)
             except:
+                # This is typically the case if the nugget is too small.
+                # Typically: LinAlgError: 2-th leading minor not positive definite
                 return -np.inf
 
             # The determinant of R is equal to the squared product of the diagonal
@@ -196,11 +201,15 @@ class BirthdayAnalysis(GaussianProcess):
             return lnl0 + lnl1 + lnl2 + lnp
 
         if theta is None:
-            guess = (0.7**2, 0.4**2, 0.1**2, 0.1**2, 0.1**2)
+            guess = self.guess
         else:
             guess = theta
+
+        if True:
+            # Testing
+            lnlike(guess, D, ij, n_samples)
         
-        ndim, nwalkers, nburn, nstep = len(guess), 2*len(guess), 10, 100
+        ndim, nwalkers, nburn, nstep = len(guess), 2*len(guess), 100, 1000
         pos = [np.array((guess)) + 1e-4*np.random.randn(ndim) for i in range(nwalkers)]    
         sampler = emcee.EnsembleSampler(nwalkers, ndim, lnlike, args=(D, ij, n_samples))
         pos, prob, state = sampler.run_mcmc(pos, nburn)
@@ -256,6 +265,9 @@ class BirthdayAnalysis(GaussianProcess):
         # Predictor
         y = (self.y_mean + self.y_std * y_).reshape(n_eval, n_targets)
 
+        #import pdb; pdb.set_trace()
+        #plt.plot(self.raw_X[:100], self.raw_y[:100], "ro"); plt.plot(X, (self.y_mean + 4*self.y_std * y_), "k-"); plt.show()
+        
         if eval_MSE:
             D, ij = l1_cross_distances(X)
             r = corr(D)
@@ -267,7 +279,7 @@ class BirthdayAnalysis(GaussianProcess):
         return y
 
 if __name__ == "__main__":
-    npts = 365*3
+    npts = 365//2
 
     bda  = BirthdayAnalysis()
     #bda.compareToSklearn(npts=npts)
@@ -275,7 +287,7 @@ if __name__ == "__main__":
     xeval = np.atleast_2d(np.linspace(bda.X.min(), bda.X.max(), 1000)).T
     ypred, var = bda.predict(xeval, eval_MSE=True)
     sigma = np.sqrt(var)
-    plt.plot(bda.raw_X, bda.raw_y, "ro")
+    plt.plot(bda.raw_X[:npts], bda.raw_y[:npts], "ro")
     plt.plot(xeval, ypred, "b-")
     plt.fill_between(xeval[:,0], ypred[:,0]-sigma, ypred[:,0]+sigma, facecolor='blue', alpha=0.25)
 
