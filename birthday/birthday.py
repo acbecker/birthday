@@ -18,29 +18,53 @@ def squared_scaled_exponential(theta, x):
     return ssq * np.exp(-x**2/lsq)
 def periodic_exponential(theta, x):
     ssq, lsq, period = theta
-    return ssq * np.exp(-2*np.sin(np.pi/period * x)**2 / lsq)
-def covariance_full(theta, x):
-    """ Represents the full covaraince function for the birthday analysis.  Start simple!"""
-    # Fixed parameters
-    lsq1 = 100
-    
-    ssq1 = theta
-    return squared_scaled_exponential((ssq1, lsq1), x)
+    return ssq * np.exp(-2*np.sin(x*np.pi/period)**2 / lsq)
 
 # Core class derived from sklearn.gaussian_process.GaussianProcess
 class BirthdayAnalysis(GaussianProcess):
     def __init__(self, **args):
         GaussianProcess.__init__(self, **args)
-        self.corr  = covariance_full
+        self.corr  = self.covariance
         self.raw_X = None
         self.raw_y = None
         self.getData()
+
+        self.lsq1  = 365**2
+        self.lsq2  = 10**2
+        self.lsq31 = 2**2
+        self.lsq32 = 20**2
+        self.p3    = 7.0
+        self.lsq41 = 100**2
+        self.lsq42 = 1000**2
+        self.p4    = 365.25
+
+    def covariance(self, theta, x):
+        ssq1, ssq2, ssq3, ssq4 = theta
+        cov1 = squared_scaled_exponential((ssq1, self.lsq1), x)
+        cov2 = squared_scaled_exponential((ssq2, self.lsq2), x)
+        cov3 = periodic_exponential((ssq3, self.lsq31, self.p3), x) * squared_scaled_exponential((1.0, self.lsq32), x)
+        cov4 = periodic_exponential((ssq4, self.lsq41, self.p4), x) * squared_scaled_exponential((1.0, self.lsq42), x)
+        return cov1+cov2+cov3+cov4
+
+    def predict_by_component(self, X, eval_MSE=False):
+        ssq1, ssq2, ssq3, ssq4 = self.theta_        
+        cov1 = lambda x: squared_scaled_exponential((ssq1, self.lsq1), x)
+        cov2 = lambda x: squared_scaled_exponential((ssq2, self.lsq2), x)
+        cov3 = lambda x: periodic_exponential((ssq3, self.lsq31, self.p3), x) * squared_scaled_exponential((1.0, self.lsq32), x)
+        cov4 = lambda x: periodic_exponential((ssq4, self.lsq41, self.p4), x) * squared_scaled_exponential((1.0, self.lsq42), x)
+
+        pred1 = self.predict(X, corr=cov1, eval_MSE=eval_MSE)
+        pred2 = self.predict(X, corr=cov2, eval_MSE=eval_MSE)
+        pred3 = self.predict(X, corr=cov3, eval_MSE=eval_MSE)
+        pred4 = self.predict(X, corr=cov4, eval_MSE=eval_MSE)
+
+        return pred1, pred2, pred3, pred4
 
     def getData(self):
         datfile = os.path.join(os.path.dirname(__file__), "birthdates-1968-1988.csv")
         df = pd.read_csv(datfile, "df", delimiter=",",
                          parse_dates={"date": [0,1,2]}, index_col="date")
-        X = np.atleast_2d(df.day_of_year[:npts].values).T
+        X = np.atleast_2d([(x-df.index[0]).days for x in df.index]).T
         y = df.births[:npts].values
         self.raw_X = X
         self.raw_y = y
@@ -68,6 +92,8 @@ class BirthdayAnalysis(GaussianProcess):
         if X is None and y is None:
             X = self.raw_X[:npts]
             y = self.raw_y[:npts]
+        else:
+            return
             
         # Run input checks
         self._check_params()
@@ -103,8 +129,7 @@ class BirthdayAnalysis(GaussianProcess):
 
         # Calculate matrix of distances D between samples
         D, ij = l1_cross_distances(X)
-        if (np.min(np.sum(D, axis=1)) == 0.
-                and self.corr != correlation.pure_nugget):
+        if (np.min(np.sum(D, axis=1)) == 0.):
             raise Exception("Multiple input features cannot have the same"
                             " value.")
 
@@ -139,17 +164,18 @@ class BirthdayAnalysis(GaussianProcess):
         lnl0 = -0.5 * n_samples * np.log(2 * np.pi)
         
         def lnlike(params, *args):
-            ssq1, ssq = params
+            ssq1, ssq2, ssq3, ssq4, ssq = params
             D, ij, n_samples = args
 
-            # Priors:
-            if ssq1 < 0 or ssq < 0:
-                return -np.inf
+            # Priors: Driving term should not be less than zero or greater than 3 sigma
+            for ss in (ssq1, ssq2, ssq3, ssq4, ssq):
+                if ss < 0 or ss > 9:
+                    return -np.inf
             lnp = 0.0
 
             # Set up R
-            r = self.corr((ssq1), D)
-            R = np.eye(n_samples) * (1. + ssq)
+            r = self.corr(params[:-1], D)
+            R = np.eye(n_samples) * (1. + params[-1])
             R[ij[:, 0], ij[:, 1]] = r.ravel()
             R[ij[:, 1], ij[:, 0]] = r.ravel()
         
@@ -170,11 +196,11 @@ class BirthdayAnalysis(GaussianProcess):
             return lnl0 + lnl1 + lnl2 + lnp
 
         if theta is None:
-            guess = (0.7**2, 0.1**2)
+            guess = (0.7**2, 0.4**2, 0.1**2, 0.1**2, 0.1**2)
         else:
             guess = theta
         
-        ndim, nwalkers, nburn, nstep = len(guess), 2*len(guess), 100, 1000
+        ndim, nwalkers, nburn, nstep = len(guess), 2*len(guess), 10, 100
         pos = [np.array((guess)) + 1e-4*np.random.randn(ndim) for i in range(nwalkers)]    
         sampler = emcee.EnsembleSampler(nwalkers, ndim, lnlike, args=(D, ij, n_samples))
         pos, prob, state = sampler.run_mcmc(pos, nburn)
@@ -204,7 +230,10 @@ class BirthdayAnalysis(GaussianProcess):
         
         return reduced_likelihood_function_value, par
 
-    def predict(self, X, eval_MSE=False):
+    def predict(self, X, corr=None, eval_MSE=False):
+        if corr is None:
+            corr = lambda x: self.corr(self.theta_, x)
+            
         # Check input shapes
         X = array2d(X)
         n_eval, _ = X.shape
@@ -219,7 +248,7 @@ class BirthdayAnalysis(GaussianProcess):
 
         # Covariance of new data with old
         dx = manhattan_distances(X, Y=self.X, sum_over_features=False)
-        Rcross = self.corr(self.theta_, dx).reshape(n_eval, n_samples)
+        Rcross = corr(dx).reshape(n_eval, n_samples)
 
         Rinv = linalg.inv(self.R)
         # Scaled predictor
@@ -229,8 +258,8 @@ class BirthdayAnalysis(GaussianProcess):
 
         if eval_MSE:
             D, ij = l1_cross_distances(X)
-            r = self.corr(self.theta_, D)
-            Rpred = np.eye(n_eval) # No nugget here?
+            r = corr(D)
+            Rpred = np.eye(n_eval) * (1. + self.nugget)
             Rpred[ij[:, 0], ij[:, 1]] = r.ravel()
             Rpred[ij[:, 1], ij[:, 0]] = r.ravel()
             var = Rpred - np.dot(Rcross, np.dot(Rinv, Rcross.T))
@@ -238,7 +267,8 @@ class BirthdayAnalysis(GaussianProcess):
         return y
 
 if __name__ == "__main__":
-    npts = 100
+    npts = 365*3
+
     bda  = BirthdayAnalysis()
     #bda.compareToSklearn(npts=npts)
     bda.fit(npts=npts)
@@ -248,6 +278,13 @@ if __name__ == "__main__":
     plt.plot(bda.raw_X, bda.raw_y, "ro")
     plt.plot(xeval, ypred, "b-")
     plt.fill_between(xeval[:,0], ypred[:,0]-sigma, ypred[:,0]+sigma, facecolor='blue', alpha=0.25)
+
+    ypred1, ypred2, ypred3, ypred4 = bda.predict_by_component(xeval, eval_MSE=False)
+    plt.plot(xeval, ypred1, "g-")
+    plt.plot(xeval, ypred2, "r-")
+    plt.plot(xeval, ypred3, "k-")
+    plt.plot(xeval, ypred4, "m-")
+    
     import pdb; pdb.set_trace()
     plt.show()
     
