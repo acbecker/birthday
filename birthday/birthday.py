@@ -7,6 +7,7 @@ from scipy import linalg
 from sklearn.gaussian_process import GaussianProcess
 from sklearn.gaussian_process.gaussian_process import l1_cross_distances
 from sklearn.utils import array2d, check_random_state, check_arrays
+from sklearn.metrics.pairwise import manhattan_distances
 
 YEAR = 365.25
 MACHINE_EPSILON = np.finfo(np.double).eps
@@ -141,6 +142,7 @@ class BirthdayAnalysis(GaussianProcess):
                                                  self.reduced_likelihood_function()
 
         # Stuff needed for predict
+        self.R = par['R']
         self.C = par['C']
 
         return self
@@ -182,6 +184,8 @@ class BirthdayAnalysis(GaussianProcess):
             # The determinant of R is equal to the squared product of the diagonal
             # elements of its Cholesky decomposition C
             detR  = (np.diag(C) ** (2. / n_samples)).prod()
+
+            # Marginal likelihood
             lnl   = lnl0
             lnl  += -0.5 * detR
             lnl  += -0.5 * np.dot(np.dot(self.y.T, linalg.inv(R)), self.y)
@@ -189,7 +193,7 @@ class BirthdayAnalysis(GaussianProcess):
             return lnl + lnp
 
         if theta is None:
-            guess = (0.7**2, 365.0**2, 0.1**2)
+            guess = (0.7**2, 1.0**2, 0.1**2)
         else:
             guess = theta
             
@@ -218,9 +222,43 @@ class BirthdayAnalysis(GaussianProcess):
         R[ij[:, 1], ij[:, 0]] = r.ravel()
         C = linalg.cholesky(R, lower=True)
         par['C'] = C
+        par['R'] = R
         reduced_likelihood_function_value = flatProb[sortIdx[0]]
         
         return reduced_likelihood_function_value, par
+
+    def predict(self, X, eval_MSE=False):
+        # Check input shapes
+        X = array2d(X)
+        n_eval, _ = X.shape
+        n_samples, n_features = self.X.shape
+        n_samples_y, n_targets = self.y.shape
+
+        # Run input checks
+        self._check_params(n_samples)
+
+        # Normalize input
+        X = (X - self.X_mean) / self.X_std
+
+        # Covariance of new data with old
+        dx = manhattan_distances(X, Y=self.X, sum_over_features=False)
+        Rcross = self.corr(self.theta_, dx).reshape(n_eval, n_samples)
+
+        Rinv = linalg.inv(self.R)
+        # Scaled predictor
+        y_ = np.dot(Rcross, np.dot(Rinv, self.y))
+        # Predictor
+        y = (self.y_mean + self.y_std * y_).reshape(n_eval, n_targets)
+
+        if eval_MSE:
+            D, ij = l1_cross_distances(X)
+            r = self.corr(self.theta_, D)
+            Rpred = np.eye(n_eval) * (1. + self.nugget)
+            Rpred[ij[:, 0], ij[:, 1]] = r.ravel()
+            Rpred[ij[:, 1], ij[:, 0]] = r.ravel()
+            var = Rpred - np.dot(Rcross, np.dot(Rinv, Rcross.T))
+            return y, var.diagonal()
+        return y
 
 if __name__ == "__main__":
     npts = 100
@@ -228,6 +266,11 @@ if __name__ == "__main__":
     #bda.compareToSklearn(npts=npts)
     bda.fit(npts=npts)
     xeval = np.atleast_2d(np.linspace(bda.raw_X.min(), bda.raw_X.max(), 1000)).T
-    ypred = bda.predict(xeval, eval_MSE=False)
+    ypred, var = bda.predict(xeval, eval_MSE=True)
+    sigma = np.sqrt(var)
+    plt.plot(bda.raw_X, bda.raw_y, "ro")
+    plt.plot(xeval, ypred, "b-")
+    plt.fill_between(xeval[:,0], ypred[:,0]-sigma, ypred[:,0]+sigma, facecolor='blue', alpha=0.25)
     import pdb; pdb.set_trace()
+    plt.show()
     
