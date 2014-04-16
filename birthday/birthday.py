@@ -65,7 +65,7 @@ class BirthdayAnalysis(GaussianProcess):
         df = pd.read_csv(datfile, "df", delimiter=",",
                          parse_dates={"date": [0,1,2]}, index_col="date")
         X = np.atleast_2d([(x-df.index[0]).days for x in df.index]).T
-        y = df.births[:npts].values
+        y = df.births.values
         self.raw_X = X
         self.raw_y = y
 
@@ -272,7 +272,7 @@ if __name__ == "__main__":
     bda  = BirthdayAnalysis()
     #bda.compareToSklearn(npts=npts)
     bda.fit(npts=npts)
-    xeval = np.atleast_2d(np.linspace(bda.raw_X.min(), bda.raw_X.max(), 1000)).T
+    xeval = np.atleast_2d(np.linspace(bda.X.min(), bda.X.max(), 1000)).T
     ypred, var = bda.predict(xeval, eval_MSE=True)
     sigma = np.sqrt(var)
     plt.plot(bda.raw_X, bda.raw_y, "ro")
