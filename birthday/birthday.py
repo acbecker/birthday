@@ -24,11 +24,11 @@ def periodic_exponential(theta, x):
 class BirthdayAnalysis(GaussianProcess):
     def __init__(self, **args):
         GaussianProcess.__init__(self, **args)
-        self.corr  = self.covariance
         self.raw_X = None
         self.raw_y = None
         self.getData()
 
+        # Fix timescales for now
         self.lsq1  = 365**2
         self.lsq2  = 10**2
         self.lsq31 = 2**2
@@ -38,10 +38,20 @@ class BirthdayAnalysis(GaussianProcess):
         self.lsq42 = 1000**2
         self.p4    = 365.25
 
-        # Sigma-squared amplitudes
-        self.guess = (0.7, 0.4, 0.1, 0.1, 2.0)
-        
-    def covariance(self, theta, x):
+        # Modeled sigma-squared amplitudes
+        self.guess1 = (0.4, 0.1)
+        self.guess4 = (0.7, 0.4, 0.1, 0.1, 2.0)
+
+        # Choose model 1 or 4
+        self.corr  = self.covariance1
+        self.guess = self.guess1
+
+    def covariance1(self, theta, x):
+        ssq3 = theta
+        cov3 = periodic_exponential((ssq3, self.lsq31, self.p3), x) * squared_scaled_exponential((1.0, self.lsq32), x)
+        return cov3
+
+    def covariance4(self, theta, x):
         ssq1, ssq2, ssq3, ssq4 = theta
         cov1 = squared_scaled_exponential((ssq1, self.lsq1), x)
         cov2 = squared_scaled_exponential((ssq2, self.lsq2), x)
@@ -167,18 +177,17 @@ class BirthdayAnalysis(GaussianProcess):
         lnl0 = -0.5 * n_samples * np.log(2 * np.pi)
         
         def lnlike(params, *args):
-            ssq1, ssq2, ssq3, ssq4, ssq = params
             D, ij, n_samples = args
 
             # Priors: Driving term should not be less than zero or greater than 3 sigma
-            for ss in (ssq1, ssq2, ssq3, ssq4, ssq):
+            for ss in params:
                 if ss < 0 or ss > 9:
                     return -np.inf
             lnp = 0.0
 
             # Set up R
             r = self.corr(params[:-1], D)
-            R = np.eye(n_samples) * (1. + params[-1])
+            R = np.eye(n_samples) * (1. + params[-1]/self.y**2)
             R[ij[:, 0], ij[:, 1]] = r.ravel()
             R[ij[:, 1], ij[:, 0]] = r.ravel()
 
@@ -205,7 +214,7 @@ class BirthdayAnalysis(GaussianProcess):
         else:
             guess = theta
 
-        if True:
+        if False:
             # Testing
             lnlike(guess, D, ij, n_samples)
         
@@ -229,7 +238,7 @@ class BirthdayAnalysis(GaussianProcess):
         self.nugget = mapPars[-1]
         
         r = self.corr(self.theta_, D)
-        R = np.eye(n_samples) * (1. + self.nugget)
+        R = np.eye(n_samples) * (1. + self.nugget/self.y**2)
         R[ij[:, 0], ij[:, 1]] = r.ravel()
         R[ij[:, 1], ij[:, 0]] = r.ravel()
         C = linalg.cholesky(R, lower=True)
@@ -271,7 +280,7 @@ class BirthdayAnalysis(GaussianProcess):
         if eval_MSE:
             D, ij = l1_cross_distances(X)
             r = corr(D)
-            Rpred = np.eye(n_eval) * (1. + self.nugget)
+            Rpred = np.eye(n_eval) * (1. + self.nugget/self.y**2) # Do I use nugget here?
             Rpred[ij[:, 0], ij[:, 1]] = r.ravel()
             Rpred[ij[:, 1], ij[:, 0]] = r.ravel()
             var = Rpred - np.dot(Rcross, np.dot(Rinv, Rcross.T))
@@ -291,11 +300,12 @@ if __name__ == "__main__":
     plt.plot(xeval, ypred, "b-")
     plt.fill_between(xeval[:,0], ypred[:,0]-sigma, ypred[:,0]+sigma, facecolor='blue', alpha=0.25)
 
-    ypred1, ypred2, ypred3, ypred4 = bda.predict_by_component(xeval, eval_MSE=False)
-    plt.plot(xeval, ypred1, "g-")
-    plt.plot(xeval, ypred2, "r-")
-    plt.plot(xeval, ypred3, "k-")
-    plt.plot(xeval, ypred4, "m-")
+    if False:
+        ypred1, ypred2, ypred3, ypred4 = bda.predict_by_component(xeval, eval_MSE=False)
+        plt.plot(xeval, ypred1, "g-")
+        plt.plot(xeval, ypred2, "r-")
+        plt.plot(xeval, ypred3, "k-")
+        plt.plot(xeval, ypred4, "m-")
     
     import pdb; pdb.set_trace()
     plt.show()
