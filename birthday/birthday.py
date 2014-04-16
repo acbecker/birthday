@@ -280,7 +280,7 @@ class BirthdayAnalysis(GaussianProcess):
         if eval_MSE:
             D, ij = l1_cross_distances(X)
             r = corr(D)
-            Rpred = np.eye(n_eval) * (1. + self.nugget/self.y**2) # Do I use nugget here?
+            Rpred = np.eye(n_eval) # * (1. + self.nugget/self.y**2) # Do I use nugget here?
             Rpred[ij[:, 0], ij[:, 1]] = r.ravel()
             Rpred[ij[:, 1], ij[:, 0]] = r.ravel()
             var = Rpred - np.dot(Rcross, np.dot(Rinv, Rcross.T))
