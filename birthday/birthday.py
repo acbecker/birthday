@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import emcee
+import scipy.optimize as opt
 from scipy import linalg
 from sklearn.gaussian_process import GaussianProcess
 from sklearn.gaussian_process.gaussian_process import l1_cross_distances
@@ -39,17 +40,34 @@ class BirthdayAnalysis(GaussianProcess):
         self.p4    = 365.25
 
         # Modeled sigma-squared amplitudes
-        self.guess1 = (0.4, 0.1)
-        self.guess4 = (0.7, 0.4, 0.1, 0.1, 2.0)
+        self.guess1 = (0.7, 0.00005)
+        self.guess2 = (0.5, 0.2, 0.00005)
+        self.guess3 = (0.02, 0.09, 0.7, 0.00005)
+        self.guess4 = (0.02, 0.02, 0.2, 0.1, 0.00005)
 
-        # Choose model 1 or 4
+        # Choose model 
         self.corr  = self.covariance1
         self.guess = self.guess1
 
+        self.doDebug = False
+
     def covariance1(self, theta, x):
-        ssq3 = theta
+        ssq1 = theta
+        cov1 = squared_scaled_exponential((ssq1, self.lsq1), x)
+        return cov1
+
+    def covariance2(self, theta, x):
+        ssq1, ssq2 = theta
+        cov1 = squared_scaled_exponential((ssq1, self.lsq1), x)
+        cov2 = squared_scaled_exponential((ssq2, self.lsq2), x)
+        return cov1+cov2
+
+    def covariance3(self, theta, x):
+        ssq1, ssq2, ssq3 = theta
+        cov1 = squared_scaled_exponential((ssq1, self.lsq1), x)
+        cov2 = squared_scaled_exponential((ssq2, self.lsq2), x)
         cov3 = periodic_exponential((ssq3, self.lsq31, self.p3), x) * squared_scaled_exponential((1.0, self.lsq32), x)
-        return cov3
+        return cov1+cov2+cov3
 
     def covariance4(self, theta, x):
         ssq1, ssq2, ssq3, ssq4 = theta
@@ -82,14 +100,27 @@ class BirthdayAnalysis(GaussianProcess):
         self.raw_X = X
         self.raw_y = y
 
+        # Pandas datetime:
+        #   Monday.dayofweek = 0
+        # Input data convention:
+        #   Monday.day_of_week = 1
+        df["isWeekday"] = [(x in [1,2,3,4,5]) for x in df.day_of_week]
+
+        # Set up holidays:
+        df["isHoliday"] = False
+        df["isHoliday"][[(x.day==1  and x.month==1) for x in df.index]] = True # New years
+        df["isHoliday"][[(x.day==2  and x.month==1) for x in df.index]] = True # New years
+        df["isHoliday"][[(x.day==14 and x.month==2) for x in df.index]] = True # Valentine's
+        
     def compareToSklearn(self, npts=-1, doPlot=True):
         gp    = GaussianProcess(corr="squared_exponential", regr="constant",
-                                verbose=True, theta0=365.0, thetaL=1e-1, thetaU=1000)
+                                verbose=True, theta0=npts, thetaL=1e-1, thetaU=1000000,
+                                normalize=True, nugget=1e-12)
         X = self.raw_X[:npts]
         y = self.raw_y[:npts]
         gp = gp.fit(X, y)
         print gp, gp.theta_
-        xeval = np.atleast_2d(np.linspace(X.min(), X.max(), 1000)).T
+        xeval = np.atleast_2d(np.arange(X.min(), X.max(), 0.1)).T
         ypred, mse = gp.predict(xeval, eval_MSE=True)
         sigma = np.sqrt(mse)
         if doPlot:
@@ -155,12 +186,7 @@ class BirthdayAnalysis(GaussianProcess):
         self.y_mean, self.y_std = y_mean, y_std
 
         # Determine Gaussian Process model parameters
-        self.reduced_likelihood_function_value_, par = \
-                                                 self.reduced_likelihood_function()
-
-        # Stuff needed for predict
-        self.R = par['R']
-        self.C = par['C']
+        self.reduced_likelihood_function()
 
         return self
 
@@ -180,9 +206,14 @@ class BirthdayAnalysis(GaussianProcess):
             D, ij, n_samples = args
 
             # Priors: Driving term should not be less than zero or greater than 3 sigma
-            for ss in params:
+            for ss in params[:-1]:
                 if ss < 0 or ss > 9:
                     return -np.inf
+
+            # Do nugget separately; at most 1% amplitude
+            if params[-1] < 0 or params[-1] > 0.0001:
+                return -np.inf
+            
             lnp = 0.0
 
             # Set up R
@@ -197,6 +228,7 @@ class BirthdayAnalysis(GaussianProcess):
             except:
                 # This is typically the case if the nugget is too small.
                 # Typically: LinAlgError: 2-th leading minor not positive definite
+                print "WARNING: Cholesky failed"
                 return -np.inf
 
             # The determinant of R is equal to the squared product of the diagonal
@@ -206,7 +238,7 @@ class BirthdayAnalysis(GaussianProcess):
             # Marginal likelihood
             lnl1  = -0.5 * np.log(detR)
             lnl2  = -0.5 * np.dot(np.dot(self.y.T, linalg.inv(R)), self.y)
-            print params, lnl0, lnl1, lnl2
+            print params, lnl0, lnl1, lnl2, lnl0 + lnl1 + lnl2 + lnp
             return lnl0 + lnl1 + lnl2 + lnp
 
         if theta is None:
@@ -217,22 +249,30 @@ class BirthdayAnalysis(GaussianProcess):
         if False:
             # Testing
             lnlike(guess, D, ij, n_samples)
-        
-        ndim, nwalkers, nburn, nstep = len(guess), 2*len(guess), 100, 1000
-        pos = [np.array((guess)) + 1e-4*np.random.randn(ndim) for i in range(nwalkers)]    
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, lnlike, args=(D, ij, n_samples))
-        pos, prob, state = sampler.run_mcmc(pos, nburn)
-        sampler.reset()
-        pos, prob, state = sampler.run_mcmc(pos, nstep, rstate0=state)
-
-        flatProb  = sampler.lnprobability.reshape(np.product(sampler.lnprobability.shape))
-        sortIdx   = np.argsort(flatProb)[::-1]
-        sortPars  = sampler.flatchain[sortIdx]
-
-        # MAP or median?
-        mapPars     = sortPars[0]
-        medpars     = np.median(sampler.flatchain, axis=0) # Not guaranteed to be an actual step
-        
+            
+        if False:
+            ndim, nwalkers, nburn, nstep = len(guess), 2*len(guess), 100, 1000
+            pos = [np.array((guess)) + 1e-4*np.random.randn(ndim) for i in range(nwalkers)]    
+            sampler = emcee.EnsembleSampler(nwalkers, ndim, lnlike, args=(D, ij, n_samples))
+            pos, prob, state = sampler.run_mcmc(pos, nburn)
+            sampler.reset()
+            pos, prob, state = sampler.run_mcmc(pos, nstep, rstate0=state)
+            
+            flatProb  = sampler.lnprobability.reshape(np.product(sampler.lnprobability.shape))
+            sortIdx   = np.argsort(flatProb)[::-1]
+            sortPars  = sampler.flatchain[sortIdx]
+            
+            # MAP or median?
+            mapPars     = sortPars[0]
+            medpars     = np.median(sampler.flatchain, axis=0) # Not guaranteed to be an actual step
+            self.reduced_likelihood_function_value_ = flatProb[sortIdx[0]]
+        else:
+            def chi2(params):
+                return -2 * lnlike(params, D, ij, n_samples)
+            #import pdb; pdb.set_trace()
+            mapPars = opt.fmin(chi2, guess)
+            self.reduced_likelihood_function_value_ = chi2(mapPars)
+            
         # Using MAP solution
         self.theta_ = mapPars[:-1]
         self.nugget = mapPars[-1]
@@ -242,12 +282,21 @@ class BirthdayAnalysis(GaussianProcess):
         R[ij[:, 0], ij[:, 1]] = r.ravel()
         R[ij[:, 1], ij[:, 0]] = r.ravel()
         C = linalg.cholesky(R, lower=True)
-        par['C'] = C
-        par['R'] = R
-        reduced_likelihood_function_value = flatProb[sortIdx[0]]
-        
-        return reduced_likelihood_function_value, par
+        self.C = C
+        self.R = R
 
+        print "# BEST PARS", mapPars, self.reduced_likelihood_function_value_
+
+        if self.doDebug:
+            fig = plt.figure()
+            plt.plot(self.X, self.raw_y[:len(self.X)], "ro")
+            xeval = np.atleast_2d(np.linspace(self.X.min(), self.X.max(), 1000)).T
+            for pars in sampler.flatchain[::10]:
+                corr = lambda x: self.corr(pars[:-1], x)
+                ypred = self.predict(xeval, corr=corr, eval_MSE=False)
+                plt.plot(xeval, ypred, "k-", alpha=0.1)
+            plt.show()
+        
     def predict(self, X, corr=None, eval_MSE=False):
         if corr is None:
             corr = lambda x: self.corr(self.theta_, x)
@@ -260,9 +309,6 @@ class BirthdayAnalysis(GaussianProcess):
 
         # Run input checks
         self._check_params(n_samples)
-
-        # Normalize input
-        X = (X - self.X_mean) / self.X_std
 
         # Covariance of new data with old
         dx = manhattan_distances(X, Y=self.X, sum_over_features=False)
@@ -288,12 +334,12 @@ class BirthdayAnalysis(GaussianProcess):
         return y
 
 if __name__ == "__main__":
-    npts = 365//2
+    npts = 100
 
     bda  = BirthdayAnalysis()
-    #bda.compareToSklearn(npts=npts)
+    bda.compareToSklearn(npts=npts)
     bda.fit(npts=npts)
-    xeval = np.atleast_2d(np.linspace(bda.X.min(), bda.X.max(), 1000)).T
+    xeval = np.atleast_2d(np.linspace(bda.X.min(), bda.X.max(), 10*len(bda.X))).T
     ypred, var = bda.predict(xeval, eval_MSE=True)
     sigma = np.sqrt(var)
     plt.plot(bda.raw_X[:npts], bda.raw_y[:npts], "ro")
